@@ -1,0 +1,28 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+env/
+ENV/
+.env
+
+# Streamlit
+.streamlit/
+
+# Temporary files and logs
+*.log
+*.tmp
+*.pdf
+test_annotated.png
+test_pdf_annotated.png
+
+# Models / Weights
+*.pt
+*.onnx
+
+# OS generated files
+.DS_Store
+Thumbs.db
