@@ -217,8 +217,43 @@ if uploaded_file is not None and engine_ok:
                     )
                 )
 
+            st.markdown("---")
+            col_fmt_1, col_fmt_2 = st.columns(2)
+            with col_fmt_1:
+                out_fmt_choice = st.radio(
+                    "Định dạng mã xuất ra:",
+                    [
+                        "📄 Thuần LaTeX (Tạp chí - IEEEtran)", 
+                        "📄 Thuần LaTeX (Thường - Article)", 
+                        "🤖 Markdown thô (Dành cho AI đọc)"
+                    ],
+                    index=2
+                )
+            with col_fmt_2:
+                engine_choice = st.radio(
+                    "Động cơ OCR (Model):",
+                    [
+                        "🌟 Kết hợp (Nougat cho chữ, Pix2Text cho Toán/Bảng)", 
+                        "🧪 Chỉ dùng Nougat (Toàn bộ bằng Nougat)",
+                        "⚡ Chỉ dùng Pix2Text (Nhanh, Toàn bộ bằng Pix2Text)"
+                    ],
+                    index=0,
+                    help="Nougat thuần có thể nhận diện tốt hơn các công thức vật lý (Dirac, Feynman) nhưng dễ bị ảo giác nếu vùng cắt quá nhỏ."
+                )
+
             lang_hint_map   = {"Tự động (Auto)": "auto", "Tiếng Việt": "vi", "Tiếng Anh": "en"}
-            output_fmt_map  = {"📄 IEEE LaTeX (.tex)": "ieee", "📝 Văn xuôi (.md)": "plain"}
+            output_fmt_map  = {
+                "📄 Thuần LaTeX (Tạp chí - IEEEtran)": "pure_latex_ieee", 
+                "📄 Thuần LaTeX (Thường - Article)": "pure_latex_article",
+                "🤖 Markdown thô (Dành cho AI đọc)": "markdown"
+            }
+            if "Chỉ dùng Nougat" in engine_choice:
+                engine_mode = "nougat"
+            elif "Chỉ dùng Pix2Text" in engine_choice:
+                engine_mode = "pix2text"
+            else:
+                engine_mode = "hybrid"
+                
             two_column      = (layout_tab2 == "🗞️ IEEE (2 cột)")
             lang_hint       = lang_hint_map[lang_tab2]
 
@@ -233,80 +268,70 @@ if uploaded_file is not None and engine_ok:
                         from yolo_router import YoloRouter
                         router = YoloRouter(extractor)
                         preview = router.preview(
-                            page_img,
-                            conf_threshold=conf_tab2,
-                            two_column=two_column,
+                            page_img, 
+                            conf_threshold=conf_tab2, 
+                            two_column=two_column
                         )
-                        st.session_state["yolo_preview"]  = preview
+                        st.session_state["yolo_blocks"] = preview["blocks"]
+                        st.session_state["yolo_preview_img"] = preview["annotated_img"]
                         st.session_state["yolo_page_img"] = page_img
-                        st.session_state["yolo_page_idx"] = page_to_process
                     except Exception as e:
-                        st.error(f"Lỗi phân tích layout: {e}")
-                        import traceback
-                        st.code(traceback.format_exc())
+                        st.error(f"Lỗi: {e}")
 
-            if "yolo_preview" in st.session_state and st.session_state.get("yolo_page_idx") == page_to_process:
-                preview = st.session_state["yolo_preview"]
-                blocks = preview["blocks"]
-                stats = preview["stats"]
+            if "yolo_blocks" in st.session_state and "yolo_preview_img" in st.session_state:
+                st.image(st.session_state["yolo_preview_img"], use_column_width=True)
 
-                st.image(
-                    preview["annotated_img"],
-                    caption=f"Bounding Box YOLO — {'IEEE 2 cột (trái → phải)' if preview.get('two_column', True) else 'Văn xuôi 1 cột (trên → dưới)'}",
-                    use_column_width=True
-                )
-                st.markdown(
-                    "🔴 Công thức &nbsp;|&nbsp; 🔵 Văn bản/Paragraph &nbsp;|&nbsp; "
-                    "🟢 Tiêu đề &nbsp;|&nbsp; 🟡 Bảng &nbsp;|&nbsp; "
-                    "🟣 Hình &nbsp;|&nbsp; ⚪ Bỏ qua (Header/Footer)"
-                )
-                stat_str = " &nbsp;|&nbsp; ".join(f"**{k}**: {v}" for k, v in stats.items())
-                st.markdown(f"📊 {stat_str}")
-
-                st.markdown("#### Chi tiết Blocks theo thứ tự đọc")
+                blocks = st.session_state["yolo_blocks"]
                 from yolo_router import SKIP_TYPES, MATH_TYPES, FIGURE_TYPES, TABLE_TYPES
+                with st.expander(f"📋 Bảng thứ tự Blocks ({len(blocks)})"):
+                    for b in blocks:
+                        if b["type"] in SKIP_TYPES:
+                            eng = "🚫 Bỏ qua"
+                        elif b["type"] in MATH_TYPES or b["type"] in TABLE_TYPES:
+                            eng = "🟢 Nougat" if engine_mode == "nougat" else "🟢 Pix2Text"
+                        elif any(k in b["type"] for k in FIGURE_TYPES):
+                            eng = "🟣 Placeholder"
+                        else:
+                            if engine_mode == "nougat":
+                                eng = "🔵 Nougat"
+                            else:
+                                eng = "🔵 Nougat" if lang_hint in ("auto", "en") else "🔵 Pix2Text (vi)"
 
-                header_cols = st.columns([0.4, 1.4, 1.8, 2.2, 1.5])
-                header_cols[0].markdown("**#**")
-                header_cols[1].markdown("**Loại**")
-                header_cols[2].markdown("**Engine**")
-                header_cols[3].markdown("**Bbox**")
-                header_cols[4].markdown("**Preview**")
+                        row = st.columns([0.4, 1.4, 1.8, 2.2, 1.5])
+                        row[0].write(b["order"])
+                        row[1].write(b["type"])
+                        row[2].write(eng)
+                        x1, y1, x2, y2 = [int(v) for v in b["bbox"]]
+                        row[3].caption(f"({x1},{y1})→({x2},{y2})")
+                        row[4].image(b["image"], use_column_width=True)
 
-                for b in blocks:
-                    skip = b["type"] in SKIP_TYPES
-                    if skip:
-                        eng = "⚪ Bỏ qua"
-                    elif any(k in b["type"] for k in MATH_TYPES):
-                        eng = "🔴 Pix2Text Math"
-                    elif any(k in b["type"] for k in TABLE_TYPES):
-                        eng = "🟡 Pix2Text Table"
-                    elif any(k in b["type"] for k in FIGURE_TYPES):
-                        eng = "🟣 Placeholder"
-                    else:
-                        eng = "🔵 Nougat" if lang_hint in ("auto", "en") else "🔵 Pix2Text (vi)"
-
-                    row = st.columns([0.4, 1.4, 1.8, 2.2, 1.5])
-                    row[0].write(b["order"])
-                    row[1].write(b["type"])
-                    row[2].write(eng)
-                    x1, y1, x2, y2 = [int(v) for v in b["bbox"]]
-                    row[3].caption(f"({x1},{y1})→({x2},{y2})")
-                    row[4].image(b["image"], use_column_width=True)
+                # ── Cấu hình LLM ──────────────────────────────────────────────
+                st.markdown("---")
+                st.markdown("### ✨ Chuẩn hóa LaTeX bằng AI (Ollama Local)")
+                use_ollama = st.checkbox("Kích hoạt tự động sửa lỗi và dọn dẹp ảo giác bằng LLM", value=False)
+                col_m, col_u = st.columns(2)
+                with col_m:
+                    ollama_model = st.text_input("Tên Model (vd: gemma, llama3, qwen2):", value="gemma", disabled=not use_ollama)
+                with col_u:
+                    ollama_url = st.text_input("Ollama API URL:", value="http://chatbot.tail36da8e.ts.net:11434", disabled=not use_ollama)
 
                 # ── Bước 2: Convert ──────────────────────────────────────────────
                 st.markdown("---")
-                st.markdown("### 🚀 Bước 2 — Chuyển đổi LaTeX từng Block")
+                st.markdown("### 🚀 Bước 2 — Chuyển đổi LaTeX")
 
-                if st.button("🚀 Bắt đầu Chuyển đổi", type="primary", use_container_width=True, key="btn_convert"):
-                    page_img2 = st.session_state["yolo_page_img"]
+                c_btn1, c_btn2 = st.columns(2)
+                run_single = c_btn1.button("🚀 Chuyển đổi Trang hiện tại", type="primary", use_container_width=True, key="btn_convert_single")
+                run_all = c_btn2.button(f"📚 Chuyển đổi TOÀN BỘ ({len(pages)} trang)", type="primary", use_container_width=True, key="btn_convert_all")
+
+                if run_single or run_all:
                     prog_bar  = st.progress(0, text="Chuẩn bị...")
                     status_ph = st.empty()
 
                     try:
                         nougat_model_inst = None
                         nougat_dev = "cpu"
-                        if lang_hint in ("auto", "en"):
+                        # Luôn load Nougat nếu engine_mode là nougat hoặc (hybrid + text TA)
+                        if engine_mode == "nougat" or lang_hint in ("auto", "en"):
                             with st.spinner("Đang tải Nougat Base vào bộ nhớ (lần đầu ~2 phút)..."):
                                 nougat_model_inst, nougat_dev = load_nougat()
 
@@ -317,59 +342,92 @@ if uploaded_file is not None and engine_ok:
                             prog_bar.progress(current / total, text=f"[{current}/{total}] {msg}")
                             status_ph.markdown(f"⏳ **{msg}**")
 
-                        result = router2.convert(
-                            page_img2, blocks,
-                            progress_callback=on_progress,
-                            lang_hint=lang_hint,
-                            output_format="ieee"
-                        )
+                        if run_single:
+                            page_img2 = st.session_state["yolo_page_img"]
+                            result = router2.convert(
+                                page_img2, blocks,
+                                progress_callback=on_progress,
+                                lang_hint=lang_hint,
+                                output_format=output_fmt_map[out_fmt_choice],
+                                engine_mode=engine_mode
+                            )
+                        else:
+                            result = router2.convert_batch(
+                                pages,
+                                conf_threshold=conf_tab2,
+                                two_column=two_column,
+                                progress_callback=on_progress,
+                                lang_hint=lang_hint,
+                                output_format=output_fmt_map[out_fmt_choice],
+                                engine_mode=engine_mode
+                            )
 
-                        prog_bar.progress(1.0, text="✅ Hoàn tất!")
-                        status_ph.success("✅ Chuyển đổi hoàn tất!")
-
+                        prog_bar.progress(1.0, text="✅ Hoàn tất OCR!")
+                        
                         latex_full  = result["latex"]
                         latex_body  = result["latex_body"]
                         file_ext    = result.get("file_ext", ".tex")
                         lang_label  = result.get("lang_label", "latex")
-                        out_fmt     = result.get("output_format", "ieee")
+                        out_fmt     = result.get("output_format", "pure_latex_ieee")
+                        
+                        latex_full_download = latex_full
 
-                        out_label = "📄 LaTeX IEEEtran" if out_fmt == "ieee" else "📝 Văn xuôi Markdown"
-                        st.markdown(f"### {out_label}")
-                        st.code(latex_full, language=lang_label)
+                        if use_ollama:
+                            status_ph.info("⏳ Đang gửi sang Ollama để AI tự động dọn dẹp ảo giác và sửa cú pháp... (Có thể mất vài phút)")
+                            with st.spinner(f"Chờ phản hồi từ Ollama ({ollama_model})..."):
+                                try:
+                                    from ollama_corrector import fix_latex_with_ollama
+                                    latex_full_corrected = fix_latex_with_ollama(latex_full, ollama_model, ollama_url)
+                                    status_ph.success(f"✅ Chuyển đổi và Sửa lỗi AI hoàn tất!")
+                                    
+                                    st.markdown(f"### Mã nguồn xuất ra ({file_ext})")
+                                    tab_ai, tab_raw = st.tabs(["✨ Đã sửa lỗi (Ollama)", "📄 Bản gốc (OCR)"])
+                                    with tab_ai:
+                                        st.code(latex_full_corrected, language=lang_label)
+                                    with tab_raw:
+                                        st.code(latex_full, language=lang_label)
+                                        
+                                    latex_full_download = latex_full_corrected
+                                except Exception as ollama_err:
+                                    status_ph.error(f"⚠️ Lỗi kết nối Ollama: {ollama_err}")
+                                    st.markdown(f"### Mã nguồn xuất ra ({file_ext}) - Bản Gốc")
+                                    st.code(latex_full, language=lang_label)
+                        else:
+                            status_ph.success(f"✅ Chuyển đổi hoàn tất {'toàn bộ file' if run_all else 'trang này'}!")
+                            st.markdown(f"### Mã nguồn xuất ra ({file_ext})")
+                            st.code(latex_full, language=lang_label)
 
-                        st.markdown("### 👀 Xem trước nội dung")
+                        st.markdown("### 👀 Xem trước nội dung (Bản gốc)")
                         st.markdown(latex_body)
 
-                        with st.expander("🔬 Chi tiết từng Block"):
-                            for b in result["blocks_with_text"]:
-                                if b.get("skipped"):
-                                    continue
-                                st.markdown(f"**Block #{b['order']} — {b['type']}**")
-                                ca, cb = st.columns([1, 2])
-                                ca.image(b["image"], use_column_width=True)
-                                cb.code(b.get("text", ""), language=lang_label)
-                                st.divider()
+                        if run_single:
+                            with st.expander("🔬 Chi tiết từng Block (chỉ hiển thị khi chạy 1 trang)"):
+                                for b in result.get("blocks_with_text", []):
+                                    if b.get("skipped"):
+                                        continue
+                                    st.markdown(f"**Block #{b['order']} — {b['type']}**")
+                                    ca, cb = st.columns([1, 2])
+                                    ca.image(b["image"], use_column_width=True)
+                                    cb.code(b.get("text", ""), language=lang_label)
+                                    st.divider()
 
                         c1, c2 = st.columns(2)
                         c1.download_button(
                             f"⬇️ Tải đầy đủ ({file_ext})",
-                            data=latex_full,
-                            file_name=f"page_{page_to_process}_yolo{file_ext}",
-                            mime="text/plain" if file_ext == ".tex" else "text/markdown",
-                            use_container_width=True,
-                            key="btn_dl_tex"
+                            data=latex_full_download,
+                            file_name=f"yolo_output{file_ext}",
+                            mime="text/plain",
+                            use_container_width=True
                         )
                         c2.download_button(
-                            "⬇️ Tải Body (.md)",
+                            f"⬇️ Tải phần Body ({file_ext})",
                             data=latex_body,
-                            file_name=f"page_{page_to_process}_body.md",
-                            mime="text/markdown",
-                            use_container_width=True,
-                            key="btn_dl_md2"
+                            file_name=f"yolo_body{file_ext}",
+                            mime="text/plain",
+                            use_container_width=True
                         )
 
                     except Exception as e:
-                        st.error(f"Lỗi chuyển đổi: {e}")
+                        st.error(f"Lỗi khi chuyển đổi OCR: {e}")
                         import traceback
                         st.code(traceback.format_exc())
-

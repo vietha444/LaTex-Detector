@@ -314,14 +314,11 @@ class YoloRouter:
         blocks: List[Dict],
         progress_callback=None,        # callable(current, total, msg) hoặc None
         lang_hint: str = "auto",       # 'auto', 'vi', 'en'
-        output_format: str = "ieee",   # 'ieee' | 'plain'
+        output_format: str = "pure_latex_ieee",   # 'pure_latex_ieee', 'pure_latex_article', 'markdown'
+        engine_mode: str = "hybrid",   # 'hybrid' hoặc 'nougat'
     ) -> Dict[str, Any]:
         """
         Bước 2: OCR từng block theo loại, ghép thành LaTeX hoàn chỉnh.
-
-        output_format:
-            'ieee'  → Bọc trong \\documentclass{IEEEtran}, dùng \\section, equation env.
-            'plain' → Văn bản xuôi dạng Markdown/LaTeX tối giản, không có preamble.
         """
         image = image.convert("RGB")
         p2t = self.extractor.p2t
@@ -337,7 +334,6 @@ class YoloRouter:
             if progress_callback:
                 progress_callback(idx + 1, total, f"Block #{order} — {b_type}")
 
-            # Bỏ qua header / footer
             if b_type in SKIP_TYPES:
                 block_copy = dict(block)
                 block_copy["text"] = ""
@@ -346,23 +342,80 @@ class YoloRouter:
                 continue
 
             text = ""
-
             try:
-                if b_type in MATH_TYPES:
-                    raw = _ocr_math(p2t, crop)
-                    if output_format == "plain":
-                        # Dạng xuôi: bọc bằng $$...$$
-                        inner = raw.strip().strip("$").strip("\\[").strip("\\]").strip()
-                        text = f"$$\n{inner}\n$$" if inner else raw
+                raw = ""
+                # ==========================================
+                # 1. OCR ENGINES (Trích xuất Text thô)
+                # ==========================================
+                if engine_mode == "nougat" and self.nougat_model is not None and b_type not in FIGURE_TYPES:
+                    raw = _ocr_text_nougat(self.nougat_model, self.nougat_device, crop)
+                    # Fallback nếu Nougat bị ảo giác/trả về rỗng trên block cắt nhỏ
+                    if not raw.strip():
+                        if b_type in MATH_TYPES:
+                            raw = _ocr_math(p2t, crop)
+                        elif b_type in TABLE_TYPES:
+                            raw = _ocr_table(p2t, crop)
+                        else:
+                            raw = _ocr_text_pix2text(p2t, crop)
+                elif engine_mode == "pix2text" and b_type not in FIGURE_TYPES:
+                    # Ép toàn bộ chạy qua Pix2Text
+                    if b_type in MATH_TYPES:
+                        raw = _ocr_math(p2t, crop)
+                    elif b_type in TABLE_TYPES:
+                        raw = _ocr_table(p2t, crop)
                     else:
-                        # IEEE: dùng \begin{equation}
-                        inner = raw.strip().strip("$").strip("\\[").strip("\\]").strip()
-                        text = f"\\begin{{equation}}\n{inner}\n\\end{{equation}}" if inner else raw
+                        raw = _ocr_text_pix2text(p2t, crop)
+                else:
+                    # Hybrid Mode (Phân tách chuyên biệt)
+                    if b_type in MATH_TYPES:
+                        raw = _ocr_math(p2t, crop)
+                    elif b_type in TABLE_TYPES:
+                        raw = _ocr_table(p2t, crop)
+                    elif b_type in FIGURE_TYPES:
+                        raw = ""
+                    else:
+                        if lang_hint == "vi":
+                            detected = "vi"
+                        elif lang_hint == "en":
+                            detected = "en"
+                        else:
+                            try:
+                                detected = detect_language(_ocr_text_pix2text(p2t, crop))
+                            except Exception:
+                                detected = "en"
+
+                        if detected == "vi":
+                            raw = _ocr_text_pix2text(p2t, crop)
+                        else:
+                            if self.nougat_model is not None:
+                                raw = _ocr_text_nougat(self.nougat_model, self.nougat_device, crop)
+                                if not raw.strip():
+                                    raw = _ocr_text_pix2text(p2t, crop)
+                            else:
+                                raw = _ocr_text_pix2text(p2t, crop)
+
+                # ==========================================
+                # 2. FORMAT LẠI THEO OUTPUT_FORMAT
+                # ==========================================
+                if b_type in MATH_TYPES:
+                    inner = raw.strip()
+                    if inner.startswith("$$") and inner.endswith("$$"):
+                        inner = inner[2:-2].strip()
+                    elif inner.startswith("\\[") and inner.endswith("\\]"):
+                        inner = inner[2:-2].strip()
+                    elif inner.startswith("$") and inner.endswith("$"):
+                        inner = inner[1:-1].strip()
+
+                    if output_format.startswith("pure_latex"):
+                        if inner.startswith("\\begin{equation}") or inner.startswith("\\begin{align"):
+                            text = inner
+                        else:
+                            text = f"\\begin{{equation}}\n{inner}\n\\end{{equation}}" if inner else raw
+                    else:
+                        text = f"$$\n{inner}\n$$" if inner else raw
 
                 elif b_type in FIGURE_TYPES:
-                    if output_format == "plain":
-                        text = f"> 🖼️ *[Hình #{order} — xem ảnh đính kèm]*"
-                    else:
+                    if output_format.startswith("pure_latex"):
                         text = (
                             f"\\begin{{figure}}[h]\n"
                             f"  \\centering\n"
@@ -370,45 +423,40 @@ class YoloRouter:
                             f"  \\caption{{Figure {order}}}\n"
                             f"\\end{{figure}}"
                         )
+                    else:
+                        text = f"> 🖼️ *[Hình #{order} — xem ảnh đính kèm]*"
 
                 elif b_type in TABLE_TYPES:
-                    raw = _ocr_table(p2t, crop)
-                    if output_format == "plain":
-                        text = raw  # Giữ dạng Markdown table
-                    else:
-                        text = raw  # Pix2Text đã trả về dạng tabular
+                    text = raw
 
                 else:
-                    # Tiêu đề / Paragraph / Text
-                    if lang_hint == "vi":
-                        detected = "vi"
-                    elif lang_hint == "en":
-                        detected = "en"
-                    else:
-                        try:
-                            sample = _ocr_text_pix2text(p2t, crop)
-                            detected = detect_language(sample)
-                        except Exception:
-                            detected = "en"
-
-                    if detected == "vi":
-                        text = _ocr_text_pix2text(p2t, crop)
-                    else:
-                        if self.nougat_model is not None:
-                            text = _ocr_text_nougat(self.nougat_model, self.nougat_device, crop)
-                        else:
-                            text = _ocr_text_pix2text(p2t, crop)
-
-                    # Xử lý tiêu đề theo format
+                    text = raw
                     if b_type in TITLE_TYPES:
-                        t = text.strip()
-                        if output_format == "plain":
-                            text = f"## {t}"
-                        else:
+                        import re
+                        t = re.sub(r'^#+\s*', '', text.strip())
+                        if output_format.startswith("pure_latex"):
                             text = f"\\section*{{{t}}}"
-
+                        else:
+                            text = f"## {t}"
+                            
             except Exception as e:
                 text = f"% Lỗi block #{order}: {e}"
+                
+            # Áp dụng Pure LaTeX (loại bỏ markdown, đổi bảng thành \begin{tabular})
+            # KHÔNG áp dụng cho MATH_TYPES để bảo vệ tuyệt đối mã LaTeX
+            if output_format.startswith("pure_latex") and b_type not in MATH_TYPES:
+                from latex_postprocessor import markdown_to_pure_latex
+                is_tbl = (b_type in TABLE_TYPES)
+                text = markdown_to_pure_latex(text, is_table=is_tbl)
+
+            # Dọn dẹp mồ côi \end{...} do ảo giác OCR sinh ra
+            if output_format.startswith("pure_latex"):
+                import re
+                # Nếu text có \end{equation} mà không có \begin{equation}, comment nó lại
+                if "\\end{equation}" in text and "\\begin{equation}" not in text:
+                    text = text.replace("\\end{equation}", "% \\end{equation} (orphaned)")
+                if "\\end{aligned}" in text and "\\begin{aligned}" not in text:
+                    text = text.replace("\\end{aligned}", "% \\end{aligned} (orphaned)")
 
             latex_parts.append(text)
 
@@ -420,9 +468,9 @@ class YoloRouter:
         # ── Ghép đầu ra theo format ─────────────────────────────────────────
         latex_body = "\n\n".join(p for p in latex_parts if p.strip())
 
-        if output_format == "ieee":
+        if output_format == "pure_latex_ieee":
             latex_full = (
-                "% === Được tạo bởi YOLO-Router (IEEEtran) ===\n"
+                "% === Được tạo bởi YOLO-Router (Pure LaTeX, IEEEtran) ===\n"
                 "\\documentclass{IEEEtran}\n"
                 "\\usepackage{amsmath,amssymb,graphicx,booktabs}\n"
                 "\\begin{document}\n\n"
@@ -431,12 +479,20 @@ class YoloRouter:
             )
             file_ext = ".tex"
             lang_label = "latex"
-        else:
-            # Plain: Markdown + LaTeX inline, không cần preamble
+        elif output_format == "pure_latex_article":
             latex_full = (
-                "<!-- Được tạo bởi YOLO-Router (Plain) -->\n\n"
+                "% === Được tạo bởi YOLO-Router (Pure LaTeX, Article) ===\n"
+                "\\documentclass{article}\n"
+                "\\usepackage{amsmath,amssymb,graphicx,booktabs}\n"
+                "\\begin{document}\n\n"
                 + latex_body
+                + "\n\n\\end{document}\n"
             )
+            file_ext = ".tex"
+            lang_label = "latex"
+        else:
+            # Markdown: Định dạng thô, hoàn hảo để nạp cho AI / LLM
+            latex_full = latex_body
             file_ext = ".md"
             lang_label = "markdown"
 
@@ -444,6 +500,80 @@ class YoloRouter:
             "latex": latex_full,
             "latex_body": latex_body,
             "blocks_with_text": blocks_with_text,
+            "file_ext": file_ext,
+            "lang_label": lang_label,
+            "output_format": output_format,
+        }
+
+    def convert_batch(
+        self,
+        images: List[Image.Image],
+        conf_threshold: float = 0.25,
+        two_column: bool = True,
+        progress_callback=None,
+        lang_hint: str = "auto",
+        output_format: str = "pure_latex_ieee",
+        engine_mode: str = "hybrid",
+    ) -> Dict[str, Any]:
+        """
+        Xử lý hàng loạt toàn bộ PDF (nhiều trang).
+        Kết hợp latex_body của từng trang, sau đó bọc preamble chung.
+        """
+        all_bodies = []
+        total_pages = len(images)
+
+        for i, img in enumerate(images):
+            def block_cb(cur, tot, msg):
+                if progress_callback:
+                    progress_callback(i + 1, total_pages, msg)
+            
+            if progress_callback:
+                progress_callback(i + 1, total_pages, f"Phân tích layout trang {i+1}...")
+
+            preview = self.preview(img, conf_threshold=conf_threshold, two_column=two_column)
+            res = self.convert(
+                img, preview["blocks"],
+                progress_callback=block_cb,
+                lang_hint=lang_hint,
+                output_format=output_format,
+                engine_mode=engine_mode
+            )
+            all_bodies.append(res["latex_body"])
+
+        separator = "\n\n\\newpage\n\n" if output_format.startswith("pure_latex") else "\n\n---\n\n"
+        full_body = separator.join(all_bodies)
+
+        # Bọc Preamble một lần duy nhất
+        if output_format == "pure_latex_ieee":
+            latex_full = (
+                "% === Được tạo bởi YOLO-Router (Pure LaTeX, IEEEtran) ===\n"
+                "\\documentclass{IEEEtran}\n"
+                "\\usepackage{amsmath,amssymb,graphicx,booktabs,hyperref,url,cite}\n"
+                "\\begin{document}\n\n"
+                + full_body
+                + "\n\n\\end{document}\n"
+            )
+            file_ext = ".tex"
+            lang_label = "latex"
+        elif output_format == "pure_latex_article":
+            latex_full = (
+                "% === Được tạo bởi YOLO-Router (Pure LaTeX, Article) ===\n"
+                "\\documentclass{article}\n"
+                "\\usepackage{amsmath,amssymb,graphicx,booktabs,hyperref,url,cite}\n"
+                "\\begin{document}\n\n"
+                + full_body
+                + "\n\n\\end{document}\n"
+            )
+            file_ext = ".tex"
+            lang_label = "latex"
+        else:
+            latex_full = full_body
+            file_ext = ".md"
+            lang_label = "markdown"
+
+        return {
+            "latex": latex_full,
+            "latex_body": full_body,
             "file_ext": file_ext,
             "lang_label": lang_label,
             "output_format": output_format,
