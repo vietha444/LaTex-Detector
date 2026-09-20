@@ -10,7 +10,7 @@ ENV/
 .env
 
 # Streamlit
-.streamlit/
+# (Bỏ chặn thư mục này vì chứa config quan trọng)
 
 # Temporary files and logs
 *.log

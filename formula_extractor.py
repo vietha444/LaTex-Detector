@@ -7,8 +7,8 @@ from typing import List, Dict, Any, Tuple
 import numpy as np
 
 class FormulaExtractor:
-    def __init__(self):
-        print("Đang khởi tạo Engine V3...")
+    def __init__(self, languages: Tuple[str, ...] = ('en',)):
+        print(f"Đang khởi tạo Engine V3 với ngôn ngữ: {languages}...")
         self.is_mock = False
         
         try:
@@ -20,6 +20,7 @@ class FormulaExtractor:
             
             # Khởi tạo toàn bộ pipeline nhưng ép backend PyTorch để né lỗi ONNX nếu có
             self.p2t = Pix2Text.from_config(
+                languages=languages,
                 device=self.device, 
                 mfd_config={'backend': 'pytorch'},
                 layout_config={'backend': 'pytorch'}
@@ -124,3 +125,91 @@ class FormulaExtractor:
                     box_idx += 1
 
         return annotated_img, results_data
+
+    def get_blocks(
+        self, image: Image.Image, conf_threshold: float = 0.25
+    ) -> List[Dict[str, Any]]:
+        """
+        Trả về danh sách block thô từ YOLO (type, bbox, confidence, cropped_image).
+        Dùng để YoloRouter điều phối OCR.
+        """
+        image = image.convert('RGB')
+        blocks_out = []
+
+        if self.is_mock:
+            return blocks_out
+
+        try:
+            parse_res = self.layout_parser.parse(image, False, conf=conf_threshold)
+            blocks = parse_res[0] if isinstance(parse_res, tuple) else parse_res
+        except Exception as e:
+            print(f"Lỗi get_blocks: {e}")
+            return blocks_out
+
+        for block in blocks:
+            b_type = str(block.get('type', 'unknown')).lower()
+            if '.' in b_type:
+                b_type = b_type.split('.')[-1]
+
+            pos = block.get('position', None)
+            if pos is None:
+                continue
+            try:
+                pos_arr = np.array(pos)
+                x1 = float(np.min(pos_arr[:, 0]))
+                x2 = float(np.max(pos_arr[:, 0]))
+                y1 = float(np.min(pos_arr[:, 1]))
+                y2 = float(np.max(pos_arr[:, 1]))
+            except Exception:
+                continue
+
+            pad = 2
+            cx1 = max(0, x1 - pad)
+            cy1 = max(0, y1 - pad)
+            cx2 = min(image.width, x2 + pad)
+            cy2 = min(image.height, y2 + pad)
+
+            if cx2 - cx1 < 5 or cy2 - cy1 < 5:
+                continue
+
+            cropped = image.crop((cx1, cy1, cx2, cy2))
+
+            blocks_out.append({
+                "type": b_type,
+                "bbox": [x1, y1, x2, y2],
+                "confidence": float(block.get('score', 1.0)),
+                "image": cropped,
+            })
+
+        return blocks_out
+
+    def process_full_page(self, image: Image.Image) -> str:
+        """
+        Trích xuất toàn bộ trang PDF (Bao gồm text, bảng biểu, công thức) 
+        và gộp lại thành định dạng Markdown (có nhúng LaTeX).
+        """
+        if self.is_mock or self.p2t is None:
+            return "OCR Engine chưa sẵn sàng hoặc bị lỗi khởi tạo."
+            
+        import tempfile
+        try:
+            image = image.convert('RGB')
+            # recognize_page sẽ dùng đầy đủ pipeline (Layout -> MFD -> Text/Math OCR)
+            # Tăng resized_shape lên 1536 để không làm mờ chữ khi xử lý PDF độ phân giải cao
+            page_data = self.p2t.recognize_page(
+                image, 
+                resized_shape=1536,
+                text_contain_formula=True
+            )
+            
+            with tempfile.TemporaryDirectory() as tmpdir:
+                # to_markdown yêu cầu out_dir để lưu các ảnh crop (bảng biểu/hình vẽ) nếu có
+                md_text = page_data.to_markdown(out_dir=tmpdir)
+                return md_text
+                
+        except Exception as e:
+            print(f"Lỗi khi trích xuất toàn trang: {e}")
+            import traceback
+            traceback.print_exc()
+            return f"**Đã xảy ra lỗi khi trích xuất:**\n```\n{e}\n```"
+
