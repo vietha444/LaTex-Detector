@@ -396,29 +396,16 @@ class YoloRouter:
                     else:
                         if self.nougat_model is not None:
                             text = _ocr_text_nougat(self.nougat_model, self.nougat_device, crop)
-                            # FALLBACK: Nougat thường trả về rỗng khi crop quá nhỏ
-                            if not text.strip():
-                                text = _ocr_text_pix2text(p2t, crop)
                         else:
                             text = _ocr_text_pix2text(p2t, crop)
 
                     # Xử lý tiêu đề theo format
                     if b_type in TITLE_TYPES:
-                        import re
-                        # Xóa dấu '#' markdown nếu có
-                        t = re.sub(r'^#+\s*', '', text.strip())
+                        t = text.strip()
                         if output_format == "plain":
                             text = f"## {t}"
                         else:
                             text = f"\\section*{{{t}}}"
-                    else:
-                        # Thoát ký tự đặc biệt cho LaTeX để tránh mất chữ (vd: %)
-                        if output_format == "ieee":
-                            # Chỉ escape % nếu nó không đứng sau \ (không phải \%)
-                            import re
-                            text = re.sub(r'(?<!\\)%', r'\%', text)
-                            # Xóa '#' markdown đầu dòng để LaTeX khỏi lỗi
-                            text = re.sub(r'^#+\s*', '', text, flags=re.MULTILINE)
 
             except Exception as e:
                 text = f"% Lỗi block #{order}: {e}"
